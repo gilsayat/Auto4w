@@ -1,0 +1,14 @@
+image: Visual Studio 2022
+configuration: Release
+platform: Any CPU
+
+before_build:
+  - nuget restore AUTO4W.sln
+
+build:
+  project: AUTO4W.sln
+  verbosity: minimal
+
+artifacts:
+  - path: AUTO4W\bin\Release\AUTO4W.exe
+    name: AUTO4W-Windows
