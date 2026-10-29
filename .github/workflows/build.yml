@@ -17,7 +17,7 @@ jobs:
       uses: microsoft/setup-msbuild@v2
 
     - name: Build Solution
-      run: msbuild AUTO4W.sln /p:Configuration=Release
+      run: msbuild AUTO4W.csproj /p:Configuration=Release
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
