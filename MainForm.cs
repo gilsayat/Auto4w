@@ -1,335 +1,1007 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace AUTO4W
 {
     public class MainForm : Form
     {
-        private AppSettings settings;
-        private readonly TabControl tabs = new TabControl();
-        private readonly TextBox logBox = new TextBox();
-        private readonly TextBox[] folderBoxes = new TextBox[4];
-        private readonly CheckBox fourWallets = new CheckBox();
-        private readonly CheckBox errorFix = new CheckBox();
-        private readonly CheckBox orderSeparation = new CheckBox();
-        private readonly CheckBox startup = new CheckBox();
-        private readonly CheckBox darkTheme = new CheckBox();
-        private readonly CheckBox confirm = new CheckBox();
-        private readonly TextBox oldExt = new TextBox();
-        private readonly TextBox newExt = new TextBox();
-        private readonly TextBox photoSize = new TextBox();
-        private readonly TextBox photoLayout = new TextBox();
-        private readonly DataGridView scheduleGrid = new DataGridView();
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool DestroyIcon(IntPtr handle);
 
-        private readonly string[] folderNames = { "Incoming", "Toprint", "Digital", "Errors" };
+        private static readonly HashSet<string> NonOrderExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp",
+            ".exe", ".dll", ".pdb", ".zip", ".rar", ".7z", ".ini", ".db", ".tmp"
+        };
+
+        private AppSettings settings;
+        private bool isRunning = false;
+        private bool isBusyCycle = false;
+        private readonly Timer workerTimer = new Timer();
+        private readonly HashSet<string> processedInPlaceFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // UI Controls
+        private Panel headerPanel;
+        private Label titleLabel;
+        private Button themeBtn;
+
+        private ModernToggle toggleSeparation;
+        private ModernToggle toggleAuto4W;
+        private ModernToggle toggleErrorFix;
+        private Label lblSeparation;
+        private Label lblAuto4W;
+        private Label lblErrorFix;
+
+        private Label lbl4WSize;
+        private ComboBox cmb4WSize;
+
+        private readonly Panel[] folderCards = new Panel[4];
+        private readonly Label[] folderLabels = new Label[4];
+        private readonly TextBox[] folderBoxes = new TextBox[4];
+        private readonly Button[] browseButtons = new Button[4];
+
+        private Button btnStartStop;
+
+        private Label lblHistoryHeader;
+        private Button btnClearHistory;
+        private ListBox lstHistory;
+
+        private Panel statusPanel;
+        private Label lblStatusDot;
+        private Label lblStatusText;
 
         public MainForm()
         {
             settings = AppSettings.Load();
+
             Text = "AUTO4W";
-            MinimumSize = new Size(780, 560);
-            Size = new Size(980, 680);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            Font = new Font("Segoe UI", 9F);
-            BackColor = Color.FromArgb(245, 247, 251);
-            BuildUi();
-            LoadSettingsToUi();
+            ClientSize = new Size(420, 560);
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+
+            SetCustom4WIcon();
+            BuildCompactUi();
+            LoadSettingsIntoUi();
             ApplyTheme();
-            Log("AUTO4W started. Settings loaded.");
+
+            workerTimer.Interval = 2000;
+            workerTimer.Tick += WorkerTimer_Tick;
+
+            Log("AUTO4W ready. Press START to lock & run.");
         }
 
-        private Label LabelFor(string text, int x, int y, int width = 160)
+        private void SetCustom4WIcon()
         {
-            return new Label { Text = text, Left = x, Top = y, Width = width, Height = 26, TextAlign = ContentAlignment.MiddleLeft };
-        }
-
-        private void BuildUi()
-        {
-            var header = new Panel { Dock = DockStyle.Top, Height = 62, BackColor = Color.FromArgb(31, 67, 112) };
-            var brand = new Label { Text = "AUTO4W", ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 18F), Left = 22, Top = 13, AutoSize = true };
-            var subtitle = new Label { Text = "Customizable workflow utility", ForeColor = Color.FromArgb(215, 228, 245), Left = 145, Top = 24, AutoSize = true };
-            header.Controls.Add(brand); header.Controls.Add(subtitle);
-            Controls.Add(header);
-
-            tabs.Dock = DockStyle.Fill;
-            tabs.Padding = new Point(14, 6);
-            Controls.Add(tabs);
-            tabs.BringToFront();
-            BuildHomeTab();
-            BuildFoldersTab();
-            BuildFunctionsTab();
-            BuildSchedulesTab();
-            BuildAppearanceTab();
-            BuildExtensionsTab();
-
-            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 54, BackColor = Color.White };
-            var save = new Button { Text = "Save settings", Width = 130, Height = 32, Left = 18, Top = 10 };
-            save.Click += (s, e) => SaveFromUi();
-            var run = new Button { Text = "Run selected tasks", Width = 150, Height = 32, Left = 158, Top = 10 };
-            run.Click += (s, e) => RunSelectedTasks();
-            var preview = new Button { Text = "Preview extension changes", Width = 190, Height = 32, Left = 318, Top = 10 };
-            preview.Click += (s, e) => PreviewExtensions();
-            bottom.Controls.Add(save); bottom.Controls.Add(run); bottom.Controls.Add(preview);
-            Controls.Add(bottom);
-            bottom.BringToFront();
-        }
-
-        private void BuildHomeTab()
-        {
-            var page = new TabPage("Overview");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            var intro = new Label { Text = "Everything important, without the clutter.", Left = 22, Top = 20, Width = 650, Height = 32, Font = new Font("Segoe UI Semibold", 15F) };
-            page.Controls.Add(intro);
-            var info = new Label { Text = "Configure folders, automation, timing, photo preferences, and extension rules in the tabs above.", Left = 24, Top = 64, Width = 760, Height = 42 };
-            page.Controls.Add(info);
-            logBox.Multiline = true; logBox.ReadOnly = true; logBox.ScrollBars = ScrollBars.Vertical;
-            logBox.Font = new Font("Consolas", 9F); logBox.Left = 22; logBox.Top = 125; logBox.Width = 850; logBox.Height = 300; logBox.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            page.Controls.Add(logBox);
-            var clear = new Button { Text = "Clear log", Left = 22, Top = 438, Width = 100, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-            clear.Click += (s, e) => logBox.Clear();
-            page.Controls.Add(clear);
-            tabs.TabPages.Add(page);
-        }
-
-        private void BuildFoldersTab()
-        {
-            var page = new TabPage("Folders");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            for (int i = 0; i < folderNames.Length; i++)
+            try
             {
-                int y = 30 + i * 72;
-                page.Controls.Add(LabelFor(folderNames[i] + " folder", 24, y, 150));
-                folderBoxes[i] = new TextBox { Left = 180, Top = y, Width = 540, Height = 28, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
-                page.Controls.Add(folderBoxes[i]);
-                var browse = new Button { Text = "Browse…", Left = 730, Top = y - 1, Width = 95, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-                int index = i;
-                browse.Click += (s, e) =>
+                using (Bitmap bmp = new Bitmap(64, 64))
+                using (Graphics g = Graphics.FromImage(bmp))
                 {
-                    using (var dialog = new FolderBrowserDialog())
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                    g.Clear(Color.Transparent);
+
+                    using (GraphicsPath path = CreateRoundedRect(new Rectangle(2, 2, 60, 60), 14))
+                    using (LinearGradientBrush brush = new LinearGradientBrush(
+                        new Rectangle(0, 0, 64, 64),
+                        Color.FromArgb(20, 148, 135),
+                        Color.FromArgb(24, 90, 157),
+                        LinearGradientMode.ForwardDiagonal))
                     {
-                        dialog.SelectedPath = folderBoxes[index].Text;
-                        if (dialog.ShowDialog(this) == DialogResult.OK) folderBoxes[index].Text = dialog.SelectedPath;
+                        g.FillPath(brush, path);
                     }
-                };
-                page.Controls.Add(browse);
+
+                    using (Font f = new Font("Segoe UI", 22F, FontStyle.Bold))
+                    {
+                        SizeF size = g.MeasureString("4W", f);
+                        g.DrawString("4W", f, Brushes.White, (64 - size.Width) / 2f, (64 - size.Height) / 2f);
+                    }
+
+                    IntPtr hIcon = bmp.GetHicon();
+                    Icon = (Icon)Icon.FromHandle(hIcon).Clone();
+                    DestroyIcon(hIcon);
+                }
             }
-            var note = new Label { Text = "Folder paths are saved locally and can be changed at any time.", Left = 24, Top = 330, Width = 600 };
-            page.Controls.Add(note);
-            tabs.TabPages.Add(page);
+            catch
+            {
+            }
         }
 
-        private void BuildFunctionsTab()
+        private void BuildCompactUi()
         {
-            var page = new TabPage("Functions");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            fourWallets.Text = "Enable 4-Wallets processing"; fourWallets.SetBounds(28, 30, 320, 28);
-            errorFix.Text = "Enable Auto Error Fix"; errorFix.SetBounds(28, 75, 320, 28);
-            orderSeparation.Text = "Enable Order Separation"; orderSeparation.SetBounds(28, 120, 320, 28);
-            confirm.Text = "Ask for confirmation before processing"; confirm.SetBounds(28, 165, 360, 28);
-            page.Controls.Add(fourWallets); page.Controls.Add(errorFix); page.Controls.Add(orderSeparation); page.Controls.Add(confirm);
-            page.Controls.Add(LabelFor("Photo size preference", 28, 220, 180));
-            photoSize.SetBounds(220, 220, 240, 28); page.Controls.Add(photoSize);
-            page.Controls.Add(LabelFor("Photo layout preference", 28, 265, 180));
-            photoLayout.SetBounds(220, 265, 240, 28); page.Controls.Add(photoLayout);
-            var note = new Label { Text = "These options are configurable. Exact processing behavior will be implemented as the original rules are verified.", Left = 28, Top = 320, Width = 760, Height = 44 };
-            page.Controls.Add(note);
-            tabs.TabPages.Add(page);
+            // Header
+            headerPanel = new Panel { Dock = DockStyle.Top, Height = 42 };
+            var badge = new Label
+            {
+                Text = "4W",
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(22, 132, 125),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Bounds = new Rectangle(14, 9, 30, 24)
+            };
+            titleLabel = new Label
+            {
+                Text = "AUTO4W",
+                Font = new Font("Segoe UI Semibold", 11.5F, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(50, 10)
+            };
+            themeBtn = new Button
+            {
+                Bounds = new Rectangle(326, 8, 80, 26),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8.25F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            themeBtn.FlatAppearance.BorderSize = 1;
+            themeBtn.Click += (s, e) =>
+            {
+                settings.DarkTheme = !settings.DarkTheme;
+                settings.Save();
+                ApplyTheme();
+            };
+            headerPanel.Controls.Add(badge);
+            headerPanel.Controls.Add(titleLabel);
+            headerPanel.Controls.Add(themeBtn);
+            Controls.Add(headerPanel);
+
+            // Toggles Section
+            toggleSeparation = new ModernToggle { Location = new Point(48, 56) };
+            toggleAuto4W = new ModernToggle { Location = new Point(182, 56) };
+            toggleErrorFix = new ModernToggle { Location = new Point(316, 56) };
+
+            toggleSeparation.CheckedChanged += (s, e) => SaveCurrentUiSettings();
+            toggleAuto4W.CheckedChanged += (s, e) => SaveCurrentUiSettings();
+            toggleErrorFix.CheckedChanged += (s, e) => SaveCurrentUiSettings();
+
+            lblSeparation = new Label
+            {
+                Text = "Order Separation",
+                Bounds = new Rectangle(12, 86, 128, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold)
+            };
+            lblAuto4W = new Label
+            {
+                Text = "Auto 4W",
+                Bounds = new Rectangle(146, 86, 128, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold)
+            };
+            lblErrorFix = new Label
+            {
+                Text = "Auto Error Fix",
+                Bounds = new Rectangle(280, 86, 128, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold)
+            };
+
+            Controls.Add(toggleSeparation);
+            Controls.Add(toggleAuto4W);
+            Controls.Add(toggleErrorFix);
+            Controls.Add(lblSeparation);
+            Controls.Add(lblAuto4W);
+            Controls.Add(lblErrorFix);
+
+            // 4W Size Row
+            lbl4WSize = new Label
+            {
+                Text = "4W Size:",
+                Bounds = new Rectangle(16, 118, 65, 24),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+            };
+            cmb4WSize = new ComboBox
+            {
+                Bounds = new Rectangle(85, 118, 320, 24),
+                DropDownStyle = ComboBoxStyle.DropDown,
+                Font = new Font("Segoe UI", 9F)
+            };
+            cmb4WSize.Items.AddRange(new object[]
+            {
+                "4-Wallets (vert)",
+                "4W vert",
+                "Wallet Combo (4W)",
+                "4-Wallets",
+                "8x10 and 4W on (10in)",
+                "5x7 and 4-Wallet Combo (8x10)"
+            });
+            cmb4WSize.SelectedIndexChanged += (s, e) => SaveCurrentUiSettings();
+            cmb4WSize.TextChanged += (s, e) => SaveCurrentUiSettings();
+
+            Controls.Add(lbl4WSize);
+            Controls.Add(cmb4WSize);
+
+            // 4 Folder Rows
+            string[] titles = { "Incoming", "ToPrint", "Digital", "Errors (All Sub)" };
+            for (int i = 0; i < 4; i++)
+            {
+                int y = 152 + (i * 38);
+                folderCards[i] = new Panel
+                {
+                    Bounds = new Rectangle(14, y, 392, 32)
+                };
+
+                folderLabels[i] = new Label
+                {
+                    Text = titles[i],
+                    Bounds = new Rectangle(8, 6, 98, 20),
+                    Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold),
+                    TextAlign = ContentAlignment.MiddleLeft
+                };
+
+                folderBoxes[i] = new TextBox
+                {
+                    Bounds = new Rectangle(108, 6, 244, 20),
+                    BorderStyle = BorderStyle.None,
+                    Font = new Font("Segoe UI", 8.75F)
+                };
+                folderBoxes[i].TextChanged += (s, e) => SaveCurrentUiSettings();
+
+                int idx = i;
+                browseButtons[i] = new Button
+                {
+                    Text = "...",
+                    Bounds = new Rectangle(356, 3, 30, 25),
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                browseButtons[i].FlatAppearance.BorderSize = 0;
+                browseButtons[i].Click += (s, e) => BrowseForFolder(idx);
+
+                folderCards[i].Controls.Add(folderLabels[i]);
+                folderCards[i].Controls.Add(folderBoxes[i]);
+                folderCards[i].Controls.Add(browseButtons[i]);
+                Controls.Add(folderCards[i]);
+            }
+
+            // Start / Stop Button
+            btnStartStop = new Button
+            {
+                Bounds = new Rectangle(14, 312, 392, 38),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            btnStartStop.FlatAppearance.BorderSize = 0;
+            btnStartStop.Click += BtnStartStop_Click;
+            Controls.Add(btnStartStop);
+
+            // History Log Section
+            lblHistoryHeader = new Label
+            {
+                Text = "HISTORY LOG (7-DAY AUTO CLEAN)",
+                Bounds = new Rectangle(14, 360, 260, 18),
+                Font = new Font("Segoe UI", 7.75F, FontStyle.Bold)
+            };
+            btnClearHistory = new Button
+            {
+                Text = "Clear",
+                Bounds = new Rectangle(350, 357, 56, 22),
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 7.5F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnClearHistory.FlatAppearance.BorderSize = 1;
+            btnClearHistory.Click += (s, e) =>
+            {
+                settings.ClearLogs();
+                lstHistory.Items.Clear();
+            };
+
+            lstHistory = new ListBox
+            {
+                Bounds = new Rectangle(14, 382, 392, 140),
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 8.25F),
+                HorizontalScrollbar = true
+            };
+
+            Controls.Add(lblHistoryHeader);
+            Controls.Add(btnClearHistory);
+            Controls.Add(lstHistory);
+
+            // Bottom Status Bar
+            statusPanel = new Panel { Dock = DockStyle.Bottom, Height = 28 };
+            lblStatusDot = new Label
+            {
+                Text = "●",
+                Bounds = new Rectangle(12, 5, 16, 18),
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold)
+            };
+            lblStatusText = new Label
+            {
+                Bounds = new Rectangle(28, 6, 380, 18),
+                Font = new Font("Segoe UI", 8.25F, FontStyle.Regular)
+            };
+            statusPanel.Controls.Add(lblStatusDot);
+            statusPanel.Controls.Add(lblStatusText);
+            Controls.Add(statusPanel);
+
+            UpdateStartStopVisuals();
         }
 
-        private void BuildSchedulesTab()
+        private void BrowseForFolder(int index)
         {
-            var page = new TabPage("Timing");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            scheduleGrid.SetBounds(18, 22, 840, 300);
-            scheduleGrid.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            scheduleGrid.AllowUserToAddRows = false;
-            scheduleGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            scheduleGrid.RowHeadersVisible = false;
-            scheduleGrid.SelectionMode = DataGridViewSelectionMode.CellSelect;
-            scheduleGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Enabled", HeaderText = "On" });
-            scheduleGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Schedule name" });
-            scheduleGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Start", HeaderText = "Start (HH:mm)" });
-            scheduleGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "End", HeaderText = "End (HH:mm)" });
-            scheduleGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Days", HeaderText = "Days (Mon,Tue,…)" });
-            page.Controls.Add(scheduleGrid);
-            page.Controls.Add(new Label { Text = "Edit all six schedule groups here. Times use 24-hour HH:mm format.", Left = 20, Top = 338, Width = 700 });
-            tabs.TabPages.Add(page);
+            if (isRunning) return;
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.SelectedPath = folderBoxes[index].Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    folderBoxes[index].Text = dialog.SelectedPath;
+                    SaveCurrentUiSettings();
+                }
+            }
         }
 
-        private void BuildAppearanceTab()
-        {
-            var page = new TabPage("Appearance");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            darkTheme.Text = "Use dark theme"; darkTheme.SetBounds(28, 32, 240, 28);
-            startup.Text = "Run AUTO4W at startup (preference only in this starter)"; startup.SetBounds(28, 78, 500, 28);
-            page.Controls.Add(darkTheme); page.Controls.Add(startup);
-            page.Controls.Add(LabelFor("Accent color name", 28, 132, 170));
-            var accent = new TextBox { Name = "AccentColor", Left = 210, Top = 132, Width = 220 };
-            accent.TextChanged += (s, e) => settings.AccentColor = accent.Text;
-            page.Controls.Add(accent);
-            page.Controls.Add(new Label { Text = "More appearance options can be added without changing the processing modules.", Left = 28, Top = 190, Width = 700 });
-            tabs.TabPages.Add(page);
-        }
-
-        private void BuildExtensionsTab()
-        {
-            var page = new TabPage("Extensions");
-            page.BackColor = Color.FromArgb(245, 247, 251);
-            page.Controls.Add(LabelFor("Old extension", 28, 35, 150));
-            oldExt.SetBounds(190, 35, 230, 28); page.Controls.Add(oldExt);
-            page.Controls.Add(LabelFor("New extension", 28, 82, 150));
-            newExt.SetBounds(190, 82, 230, 28); page.Controls.Add(newExt);
-            page.Controls.Add(new Label { Text = "Preview lists candidate changes only; processing requires confirmation when that option is enabled.", Left = 28, Top = 145, Width = 720, Height = 44 });
-            tabs.TabPages.Add(page);
-        }
-
-        private void LoadSettingsToUi()
+        private void LoadSettingsIntoUi()
         {
             folderBoxes[0].Text = settings.IncomingFolder;
             folderBoxes[1].Text = settings.ToprintFolder;
             folderBoxes[2].Text = settings.DigitalFolder;
             folderBoxes[3].Text = settings.ErrorsFolder;
-            fourWallets.Checked = settings.FourWalletsEnabled;
-            errorFix.Checked = settings.AutoErrorFixEnabled;
-            orderSeparation.Checked = settings.OrderSeparationEnabled;
-            confirm.Checked = settings.ConfirmBeforeProcessing;
-            startup.Checked = settings.RunAtStartup;
-            darkTheme.Checked = settings.DarkTheme;
-            oldExt.Text = settings.OldExtension;
-            newExt.Text = settings.NewExtension;
-            photoSize.Text = settings.PhotoSize;
-            photoLayout.Text = settings.PhotoLayout;
-            scheduleGrid.Rows.Clear();
-            foreach (var schedule in settings.Schedules)
-                scheduleGrid.Rows.Add(schedule.Enabled, schedule.Name, schedule.StartTime, schedule.EndTime, schedule.Days);
+
+            toggleSeparation.Checked = settings.OrderSeparationEnabled;
+            toggleAuto4W.Checked = settings.FourWalletsEnabled;
+            toggleErrorFix.Checked = settings.AutoErrorFixEnabled;
+
+            cmb4WSize.Text = settings.Selected4WSize;
+
+            lstHistory.Items.Clear();
+            foreach (var entry in settings.HistoryLogs)
+            {
+                lstHistory.Items.Add(entry.ToString());
+            }
+            if (lstHistory.Items.Count > 0)
+            {
+                lstHistory.TopIndex = lstHistory.Items.Count - 1;
+            }
         }
 
-        private void SaveFromUi()
+        private void SaveCurrentUiSettings()
         {
+            if (folderBoxes[0] == null) return;
             settings.IncomingFolder = folderBoxes[0].Text.Trim();
             settings.ToprintFolder = folderBoxes[1].Text.Trim();
             settings.DigitalFolder = folderBoxes[2].Text.Trim();
             settings.ErrorsFolder = folderBoxes[3].Text.Trim();
-            settings.FourWalletsEnabled = fourWallets.Checked;
-            settings.AutoErrorFixEnabled = errorFix.Checked;
-            settings.OrderSeparationEnabled = orderSeparation.Checked;
-            settings.ConfirmBeforeProcessing = confirm.Checked;
-            settings.RunAtStartup = startup.Checked;
-            settings.DarkTheme = darkTheme.Checked;
-            settings.OldExtension = NormalizeExtension(oldExt.Text);
-            settings.NewExtension = NormalizeExtension(newExt.Text);
-            settings.PhotoSize = photoSize.Text.Trim();
-            settings.PhotoLayout = photoLayout.Text.Trim();
-            settings.Schedules.Clear();
-            foreach (DataGridViewRow row in scheduleGrid.Rows)
+
+            settings.OrderSeparationEnabled = toggleSeparation.Checked;
+            settings.FourWalletsEnabled = toggleAuto4W.Checked;
+            settings.AutoErrorFixEnabled = toggleErrorFix.Checked;
+
+            if (!string.IsNullOrWhiteSpace(cmb4WSize.Text))
             {
-                settings.Schedules.Add(new ScheduleGroup {
-                    Enabled = Convert.ToBoolean(row.Cells[0].Value ?? false),
-                    Name = Convert.ToString(row.Cells[1].Value ?? "Schedule"),
-                    StartTime = Convert.ToString(row.Cells[2].Value ?? "09:00"),
-                    EndTime = Convert.ToString(row.Cells[3].Value ?? "17:00"),
-                    Days = Convert.ToString(row.Cells[4].Value ?? "Mon,Tue,Wed,Thu,Fri")
-                });
+                settings.Selected4WSize = cmb4WSize.Text.Trim();
             }
-            while (settings.Schedules.Count < 6) settings.Schedules.Add(new ScheduleGroup());
+
             settings.Save();
-            ApplyTheme();
-            Log("Settings saved to " + AppSettings.SettingsPath);
-            MessageBox.Show(this, "Settings saved.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private string NormalizeExtension(string value)
+        private void BtnStartStop_Click(object sender, EventArgs e)
         {
-            value = (value ?? "").Trim();
-            if (value.Length == 0) return "";
-            return value.StartsWith(".") ? value : "." + value;
-        }
-
-        private void ApplyTheme()
-        {
-            var background = settings.DarkTheme ? Color.FromArgb(31, 36, 46) : Color.FromArgb(245, 247, 251);
-            var foreground = settings.DarkTheme ? Color.FromArgb(235, 239, 245) : Color.FromArgb(35, 45, 62);
-            foreach (TabPage page in tabs.TabPages)
+            if (!isRunning)
             {
-                page.BackColor = background;
-                foreach (Control control in page.Controls)
+                SaveCurrentUiSettings();
+
+                if (!settings.OrderSeparationEnabled && !settings.FourWalletsEnabled && !settings.AutoErrorFixEnabled)
                 {
-                    if (!(control is TextBox) && !(control is DataGridView) && !(control is Button))
-                        control.ForeColor = foreground;
-                    if (!(control is TextBox) && !(control is DataGridView))
-                        control.BackColor = background;
+                    MessageBox.Show(this, "Turn on at least one toggle (Order Separation, Auto 4W, or Auto Error Fix) before starting.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                isRunning = true;
+                UpdateStartStopVisuals();
+                Log(string.Format("STARTED [Sep:{0} | 4W:{1} | ErrFix:{2}]",
+                    settings.OrderSeparationEnabled ? "ON" : "OFF",
+                    settings.FourWalletsEnabled ? "ON" : "OFF",
+                    settings.AutoErrorFixEnabled ? "ON" : "OFF"));
+
+                RunProcessingCycle();
+                workerTimer.Start();
+            }
+            else
+            {
+                workerTimer.Stop();
+                isRunning = false;
+                UpdateStartStopVisuals();
+                Log("STOPPED — Toggles and settings unlocked.");
+            }
+        }
+
+        private void UpdateStartStopVisuals()
+        {
+            // Lock or unlock toggles and inputs based on running state
+            toggleSeparation.Enabled = !isRunning;
+            toggleAuto4W.Enabled = !isRunning;
+            toggleErrorFix.Enabled = !isRunning;
+            cmb4WSize.Enabled = !isRunning;
+
+            for (int i = 0; i < 4; i++)
+            {
+                folderBoxes[i].ReadOnly = isRunning;
+                browseButtons[i].Enabled = !isRunning;
+            }
+
+            if (isRunning)
+            {
+                btnStartStop.Text = "■   STOP ENGINE  (CONTROLS LOCKED)";
+                btnStartStop.BackColor = Color.FromArgb(182, 58, 68); // Soft muted crimson
+                lblStatusDot.ForeColor = Color.FromArgb(46, 204, 113);
+                lblStatusText.Text = "Active • Watching folders (Toggles Locked)";
+            }
+            else
+            {
+                btnStartStop.Text = "▶   START ENGINE";
+                btnStartStop.BackColor = Color.FromArgb(32, 134, 92); // Muted emerald green
+                lblStatusDot.ForeColor = Color.FromArgb(240, 173, 78);
+                lblStatusText.Text = "Stopped • Ready (Toggles Unlocked)";
+            }
+        }
+
+        private void WorkerTimer_Tick(object sender, EventArgs e)
+        {
+            if (!isRunning || isBusyCycle) return;
+            RunProcessingCycle();
+        }
+
+        private void RunProcessingCycle()
+        {
+            if (isBusyCycle) return;
+            isBusyCycle = true;
+
+            try
+            {
+                settings.PruneAndSaveLogs();
+
+                // 1. AUTO ERROR FIX (Scans Errors folder + all subfolders)
+                if (settings.AutoErrorFixEnabled)
+                {
+                    RunAutoErrorFix();
+                }
+
+                // 2. ORDER SEPARATION & AUTO 4W (Scans Incoming folder)
+                if (settings.OrderSeparationEnabled || settings.FourWalletsEnabled)
+                {
+                    RunIncomingOrderProcessor();
                 }
             }
-            BackColor = background;
-        }
-
-        private void RunSelectedTasks()
-        {
-            SaveSilently();
-            Log("Requested tasks:");
-            Log("4-Wallets: " + (settings.FourWalletsEnabled ? "enabled" : "disabled"));
-            Log("Auto Error Fix: " + (settings.AutoErrorFixEnabled ? "enabled" : "disabled"));
-            Log("Order Separation: " + (settings.OrderSeparationEnabled ? "enabled" : "disabled"));
-            Log("Task execution modules are being reconstructed; no unverified destructive actions were run.");
-            MessageBox.Show(this, "Configuration loaded. Processing modules will be activated as the original rules are verified.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void PreviewExtensions()
-        {
-            SaveSilently();
-            if (!Directory.Exists(settings.IncomingFolder))
+            catch (Exception ex)
             {
-                MessageBox.Show(this, "Incoming folder does not exist. Update it in Folders settings.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Log("Cycle warning: " + ex.Message);
+            }
+            finally
+            {
+                isBusyCycle = false;
+            }
+        }
+
+        // ====================================================================
+        // MODULE 1: AUTO ERROR FIX (All Subfolders -> Rename .err / order to .txt)
+        // ====================================================================
+        private void RunAutoErrorFix()
+        {
+            string errRoot = settings.ErrorsFolder;
+            if (string.IsNullOrWhiteSpace(errRoot) || !Directory.Exists(errRoot)) return;
+
+            IEnumerable<string> allFiles;
+            try
+            {
+                allFiles = Directory.EnumerateFiles(errRoot, "*.*", SearchOption.AllDirectories);
+            }
+            catch
+            {
                 return;
             }
-            var oldExtension = NormalizeExtension(settings.OldExtension);
-            if (String.IsNullOrWhiteSpace(oldExtension))
+
+            foreach (string filePath in allFiles)
             {
-                MessageBox.Show(this, "Enter an old extension first.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                if (!isRunning) break;
+
+                try
+                {
+                    string ext = Path.GetExtension(filePath);
+                    if (string.Equals(ext, ".txt", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (NonOrderExtensions.Contains(ext))
+                        continue;
+
+                    if (!IsFileReady(filePath))
+                        continue;
+
+                    bool isErrExt = string.Equals(ext, ".err", StringComparison.OrdinalIgnoreCase);
+                    bool looksLikeOrder = isErrExt || FileContainsOrderSignature(filePath);
+
+                    if (!looksLikeOrder)
+                        continue;
+
+                    string targetTxtPath = Path.ChangeExtension(filePath, ".txt");
+                    string origName = Path.GetFileName(filePath);
+                    string newName = Path.GetFileName(targetTxtPath);
+
+                    if (File.Exists(targetTxtPath))
+                    {
+                        File.Delete(targetTxtPath);
+                    }
+
+                    File.Move(filePath, targetTxtPath);
+                    Log("Error Fix: " + origName + " -> " + newName);
+                }
+                catch (Exception ex)
+                {
+                    Log("Error Fix skipped " + Path.GetFileName(filePath) + ": " + ex.Message);
+                }
             }
-            var files = Directory.GetFiles(settings.IncomingFolder)
-                .Where(f => String.Equals(Path.GetExtension(f), oldExtension, StringComparison.OrdinalIgnoreCase))
-                .Take(100).ToArray();
-            Log("Extension preview: found " + files.Length + " matching file(s). No files changed.");
-            foreach (var file in files.Take(12))
-                Log(Path.GetFileName(file) + "  ->  " + Path.GetFileNameWithoutExtension(file) + NormalizeExtension(settings.NewExtension));
-            if (files.Length > 12) Log("…and " + (files.Length - 12) + " more.");
-            MessageBox.Show(this, "Preview complete. No files were changed. See the Overview activity log.", "AUTO4W", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            tabs.SelectedIndex = 0;
         }
 
-        private void SaveSilently()
+        private bool FileContainsOrderSignature(string filePath)
         {
             try
             {
-                settings.IncomingFolder = folderBoxes[0].Text.Trim();
-                settings.ToprintFolder = folderBoxes[1].Text.Trim();
-                settings.DigitalFolder = folderBoxes[2].Text.Trim();
-                settings.ErrorsFolder = folderBoxes[3].Text.Trim();
-                settings.FourWalletsEnabled = fourWallets.Checked;
-                settings.AutoErrorFixEnabled = errorFix.Checked;
-                settings.OrderSeparationEnabled = orderSeparation.Checked;
-                settings.ConfirmBeforeProcessing = confirm.Checked;
-                settings.RunAtStartup = startup.Checked;
-                settings.DarkTheme = darkTheme.Checked;
-                settings.OldExtension = NormalizeExtension(oldExt.Text);
-                settings.NewExtension = NormalizeExtension(newExt.Text);
-                settings.PhotoSize = photoSize.Text.Trim();
-                settings.PhotoLayout = photoLayout.Text.Trim();
-                settings.Save();
+                FileInfo fi = new FileInfo(filePath);
+                if (fi.Length == 0 || fi.Length > 2 * 1024 * 1024) return false;
+
+                string sample = File.ReadAllText(filePath);
+                return sample.IndexOf("Media=", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       sample.IndexOf("Media =", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       sample.IndexOf("FilePath=", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       sample.IndexOf("OrderReferenceID", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       sample.IndexOf("ExtCabin", StringComparison.OrdinalIgnoreCase) >= 0;
             }
-            catch (Exception ex) { Log("Could not save settings: " + ex.Message); }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ====================================================================
+        // MODULE 2 & 3: ORDER SEPARATION & AUTO 4W
+        // ====================================================================
+        private void RunIncomingOrderProcessor()
+        {
+            string incomingDir = settings.IncomingFolder;
+            if (string.IsNullOrWhiteSpace(incomingDir) || !Directory.Exists(incomingDir)) return;
+
+            string[] orderFiles;
+            try
+            {
+                orderFiles = Directory.GetFiles(incomingDir, "*.txt", SearchOption.TopDirectoryOnly);
+            }
+            catch
+            {
+                return;
+            }
+
+            string chosen4WSize = string.IsNullOrWhiteSpace(settings.Selected4WSize)
+                ? "4-Wallets (vert)"
+                : settings.Selected4WSize.Trim();
+
+            foreach (string filePath in orderFiles)
+            {
+                if (!isRunning) break;
+
+                try
+                {
+                    if (!IsFileReady(filePath)) continue;
+
+                    string fileName = Path.GetFileName(filePath);
+                    string content = File.ReadAllText(filePath);
+                    if (string.IsNullOrWhiteSpace(content)) continue;
+
+                    bool isDigital = Regex.IsMatch(content, @"^\s*Media\s*=\s*Digital\b", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                    bool isGlossy = Regex.IsMatch(content, @"^\s*Media\s*=\s*Glossy\b", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+                    if (!isDigital && !isGlossy) continue;
+
+                    // If Order Separation is OFF, avoid re-processing the exact same file repeatedly in Incoming
+                    string fileSignature = filePath + "|" + File.GetLastWriteTimeUtc(filePath).Ticks;
+                    if (!settings.OrderSeparationEnabled && processedInPlaceFiles.Contains(fileSignature))
+                    {
+                        continue;
+                    }
+
+                    if (isDigital)
+                    {
+                        // 1. If Auto 4W is ON: copy order to ToPrint with Media=Glossy and Size=<chosen4WSize> (PrintName untouched)
+                        if (settings.FourWalletsEnabled)
+                        {
+                            Directory.CreateDirectory(settings.ToprintFolder);
+                            string toPrintCopy = ConvertDigitalOrderTo4WGlossy(content, chosen4WSize);
+                            string destPrintFile = Path.Combine(settings.ToprintFolder, fileName);
+                            WriteFileAtomically(destPrintFile, toPrintCopy);
+                            Log("Auto 4W (Digital): Copied " + fileName + " -> ToPrint (" + chosen4WSize + ")");
+                        }
+
+                        // 2. If Order Separation is ON: move original Digital order to Digital folder
+                        if (settings.OrderSeparationEnabled)
+                        {
+                            Directory.CreateDirectory(settings.DigitalFolder);
+                            string destDigitalFile = Path.Combine(settings.DigitalFolder, fileName);
+                            MoveFileSafely(filePath, destDigitalFile);
+                            Log("Separated: " + fileName + " -> Digital");
+                        }
+                        else
+                        {
+                            processedInPlaceFiles.Add(fileSignature);
+                        }
+                    }
+                    else if (isGlossy)
+                    {
+                        string finalGlossyContent = content;
+                        bool added4W = false;
+
+                        // 1. If Auto 4W is ON: append 4W block for each photo into the SAME single .txt order (only changing Size=)
+                        if (settings.FourWalletsEnabled)
+                        {
+                            finalGlossyContent = Append4WToGlossyOrder(content, chosen4WSize, out added4W);
+                        }
+
+                        // 2. If Order Separation is ON: move the single order to ToPrint
+                        if (settings.OrderSeparationEnabled)
+                        {
+                            Directory.CreateDirectory(settings.ToprintFolder);
+                            string destPrintFile = Path.Combine(settings.ToprintFolder, fileName);
+
+                            if (added4W)
+                            {
+                                WriteFileAtomically(destPrintFile, finalGlossyContent);
+                                File.Delete(filePath);
+                                Log("Auto 4W + Separated: " + fileName + " -> ToPrint (+4W)");
+                            }
+                            else
+                            {
+                                MoveFileSafely(filePath, destPrintFile);
+                                Log("Separated: " + fileName + " -> ToPrint");
+                            }
+                        }
+                        else if (added4W)
+                        {
+                            WriteFileAtomically(filePath, finalGlossyContent);
+                            string updatedSig = filePath + "|" + File.GetLastWriteTimeUtc(filePath).Ticks;
+                            processedInPlaceFiles.Add(updatedSig);
+                            Log("Auto 4W (Glossy): Updated " + fileName + " (+4W)");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("Order error (" + Path.GetFileName(filePath) + "): " + ex.Message);
+                }
+            }
+        }
+
+        private string ConvertDigitalOrderTo4WGlossy(string content, string fourWSize)
+        {
+            // Change Media=Digital to Media=Glossy, and Size=... to Size=<fourWSize> (PrintName stays untouched)
+            string updated = Regex.Replace(
+                content,
+                @"^(\s*Media\s*=\s*)Digital\b",
+                "${1}Glossy",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            updated = Regex.Replace(
+                updated,
+                @"^(\s*Size\s*=\s*)[^\r\n]+",
+                "${1}" + fourWSize,
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            return updated;
+        }
+
+        private string Append4WToGlossyOrder(string content, string fourWSize, out bool modified)
+        {
+            modified = false;
+            string normalized = content.Replace("\r\n", "\n").Replace("\r", "\n");
+            string[] lines = normalized.Split('\n');
+
+            // Group lines into blocks separated by blank lines
+            List<List<string>> blocks = new List<List<string>>();
+            List<string> currentBlock = new List<string>();
+
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    if (currentBlock.Count > 0)
+                    {
+                        blocks.Add(currentBlock);
+                        currentBlock = new List<string>();
+                    }
+                }
+                else
+                {
+                    currentBlock.Add(line);
+                }
+            }
+            if (currentBlock.Count > 0)
+            {
+                blocks.Add(currentBlock);
+            }
+
+            List<List<string>> photoBlocks = new List<List<string>>();
+            foreach (var block in blocks)
+            {
+                bool hasSize = block.Any(l => Regex.IsMatch(l, @"^\s*Size\s*=", RegexOptions.IgnoreCase));
+                bool hasFile = block.Any(l => Regex.IsMatch(l, @"^\s*FilePath\s*=", RegexOptions.IgnoreCase));
+                if (hasSize && hasFile)
+                {
+                    photoBlocks.Add(block);
+                }
+            }
+
+            if (photoBlocks.Count == 0) return content;
+
+            // Check if 4W blocks for all photos are already present
+            int existing4WCount = photoBlocks.Count(b =>
+                b.Any(l => Regex.IsMatch(l, @"^\s*Size\s*=\s*" + Regex.Escape(fourWSize) + @"\s*$", RegexOptions.IgnoreCase)));
+            if (existing4WCount >= photoBlocks.Count)
+            {
+                return content;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.Append(content.TrimEnd());
+            sb.Append(Environment.NewLine);
+            sb.Append(Environment.NewLine);
+
+            for (int i = 0; i < photoBlocks.Count; i++)
+            {
+                foreach (string line in photoBlocks[i])
+                {
+                    if (Regex.IsMatch(line, @"^\s*Size\s*=", RegexOptions.IgnoreCase))
+                    {
+                        string prefix = Regex.Match(line, @"^\s*Size\s*=\s*", RegexOptions.IgnoreCase).Value;
+                        sb.AppendLine(prefix + fourWSize);
+                    }
+                    else if (Regex.IsMatch(line, @"^\s*Media\s*=", RegexOptions.IgnoreCase))
+                    {
+                        string prefix = Regex.Match(line, @"^\s*Media\s*=\s*", RegexOptions.IgnoreCase).Value;
+                        sb.AppendLine(prefix + "Glossy");
+                    }
+                    else
+                    {
+                        // Keeps Qty=, PrintName=, FilePath= completely untouched
+                        sb.AppendLine(line);
+                    }
+                }
+                if (i < photoBlocks.Count - 1)
+                {
+                    sb.AppendLine();
+                }
+            }
+
+            modified = true;
+            return sb.ToString();
+        }
+
+        private static bool IsFileReady(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath)) return false;
+                using (FileStream fs = File.Open(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void WriteFileAtomically(string destinationPath, string content)
+        {
+            string dir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+            string tempPath = Path.Combine(dir ?? "", Guid.NewGuid().ToString("N") + ".tmp");
+            File.WriteAllText(tempPath, content, Encoding.UTF8);
+
+            if (File.Exists(destinationPath))
+            {
+                File.Delete(destinationPath);
+            }
+            File.Move(tempPath, destinationPath);
+        }
+
+        private static void MoveFileSafely(string sourcePath, string destinationPath)
+        {
+            string dir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+            if (File.Exists(destinationPath))
+            {
+                File.Delete(destinationPath);
+            }
+            File.Move(sourcePath, destinationPath);
         }
 
         private void Log(string message)
         {
-            if (logBox.IsDisposed) return;
-            if (InvokeRequired) { BeginInvoke(new Action<string>(Log), message); return; }
-            logBox.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + message + Environment.NewLine);
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(Log), message);
+                return;
+            }
+
+            settings.AddLog(message);
+            string formatted = "[" + DateTime.Now.ToString("MM-dd HH:mm:ss") + "] " + message;
+            lstHistory.Items.Add(formatted);
+            lstHistory.TopIndex = lstHistory.Items.Count - 1;
+        }
+
+        private void ApplyTheme()
+        {
+            bool dark = settings.DarkTheme;
+
+            Color bgMain = dark ? Color.FromArgb(24, 28, 36) : Color.FromArgb(244, 246, 250);
+            Color bgHeader = dark ? Color.FromArgb(18, 21, 28) : Color.FromArgb(255, 255, 255);
+            Color bgCard = dark ? Color.FromArgb(34, 40, 52) : Color.FromArgb(255, 255, 255);
+            Color fgPrimary = dark ? Color.FromArgb(238, 242, 248) : Color.FromArgb(30, 38, 50);
+            Color fgSecondary = dark ? Color.FromArgb(156, 168, 186) : Color.FromArgb(100, 112, 128);
+            Color btnBrowseBg = dark ? Color.FromArgb(48, 56, 72) : Color.FromArgb(230, 235, 242);
+
+            BackColor = bgMain;
+            headerPanel.BackColor = bgHeader;
+            titleLabel.ForeColor = fgPrimary;
+
+            themeBtn.Text = dark ? "☀ Light" : "🌙 Dark";
+            themeBtn.BackColor = bgCard;
+            themeBtn.ForeColor = fgPrimary;
+            themeBtn.FlatAppearance.BorderColor = dark ? Color.FromArgb(55, 65, 82) : Color.FromArgb(210, 218, 228);
+
+            lblSeparation.ForeColor = fgPrimary;
+            lblAuto4W.ForeColor = fgPrimary;
+            lblErrorFix.ForeColor = fgPrimary;
+
+            toggleSeparation.DarkTheme = dark;
+            toggleAuto4W.DarkTheme = dark;
+            toggleErrorFix.DarkTheme = dark;
+
+            lbl4WSize.ForeColor = fgPrimary;
+            cmb4WSize.BackColor = bgCard;
+            cmb4WSize.ForeColor = fgPrimary;
+
+            for (int i = 0; i < 4; i++)
+            {
+                folderCards[i].BackColor = bgCard;
+                folderLabels[i].ForeColor = fgPrimary;
+                folderBoxes[i].BackColor = bgCard;
+                folderBoxes[i].ForeColor = fgSecondary;
+                browseButtons[i].BackColor = btnBrowseBg;
+                browseButtons[i].ForeColor = fgPrimary;
+            }
+
+            lblHistoryHeader.ForeColor = fgSecondary;
+            btnClearHistory.BackColor = bgCard;
+            btnClearHistory.ForeColor = fgSecondary;
+            btnClearHistory.FlatAppearance.BorderColor = dark ? Color.FromArgb(55, 65, 82) : Color.FromArgb(210, 218, 228);
+
+            lstHistory.BackColor = bgCard;
+            lstHistory.ForeColor = fgPrimary;
+
+            statusPanel.BackColor = bgHeader;
+            lblStatusText.ForeColor = fgSecondary;
+        }
+
+        internal static GraphicsPath CreateRoundedRect(Rectangle bounds, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    // Custom Modern Pill Toggle Control
+    public class ModernToggle : Control
+    {
+        private bool isChecked = false;
+        private bool darkTheme = true;
+
+        public event EventHandler CheckedChanged;
+
+        public bool Checked
+        {
+            get { return isChecked; }
+            set
+            {
+                if (isChecked != value)
+                {
+                    isChecked = value;
+                    Invalidate();
+                    if (CheckedChanged != null) CheckedChanged(this, EventArgs.Empty);
+                }
+            }
+        }
+
+        public bool DarkTheme
+        {
+            get { return darkTheme; }
+            set { darkTheme = value; Invalidate(); }
+        }
+
+        public ModernToggle()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Size = new Size(54, 26);
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnClick(EventArgs e)
+        {
+            base.OnClick(e);
+            if (!Enabled) return;
+            Checked = !Checked;
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            base.OnEnabledChanged(e);
+            Cursor = Enabled ? Cursors.Hand : Cursors.No;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Parent != null ? Parent.BackColor : BackColor);
+
+            Rectangle rect = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (GraphicsPath path = MainForm.CreateRoundedRect(rect, rect.Height / 2))
+            {
+                if (isChecked)
+                {
+                    Color c1 = Enabled ? Color.FromArgb(0, 198, 207) : Color.FromArgb(65, 115, 125);
+                    Color c2 = Enabled ? Color.FromArgb(28, 115, 212) : Color.FromArgb(55, 85, 120);
+                    using (LinearGradientBrush brush = new LinearGradientBrush(rect, c1, c2, LinearGradientMode.Horizontal))
+                    {
+                        g.FillPath(brush, path);
+                    }
+                }
+                else
+                {
+                    Color offBg = darkTheme ? Color.FromArgb(52, 60, 76) : Color.FromArgb(205, 212, 222);
+                    if (!Enabled) offBg = darkTheme ? Color.FromArgb(38, 44, 56) : Color.FromArgb(222, 226, 232);
+                    using (SolidBrush brush = new SolidBrush(offBg))
+                    {
+                        g.FillPath(brush, path);
+                    }
+                }
+            }
+
+            int thumbSize = Height - 8;
+            int thumbX = isChecked ? Width - thumbSize - 5 : 4;
+            Rectangle thumbRect = new Rectangle(thumbX, 4, thumbSize, thumbSize);
+            Color thumbColor = Enabled ? Color.White : Color.FromArgb(190, 195, 205);
+
+            using (SolidBrush thumbBrush = new SolidBrush(thumbColor))
+            {
+                g.FillEllipse(thumbBrush, thumbRect);
+            }
         }
     }
 }
