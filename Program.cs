@@ -20,7 +20,7 @@ namespace AUTO4W
         private static void Main()
         {
             bool createdNew;
-            using (Mutex mutex = new Mutex(true, @"Global\AUTO4W_SingleInstance_Mutex", out createdNew))
+            using (Mutex mutex = new Mutex(true, @"Global\AUTO4W_SingleInstance_Lock_Gil", out createdNew))
             {
                 if (!createdNew)
                 {
