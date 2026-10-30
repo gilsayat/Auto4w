@@ -1,72 +1,164 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Web.Script.Serialization;
+using System.Globalization;
+using System.Linq;
+using Microsoft.Win32;
 
 namespace AUTO4W
 {
-    public class ScheduleGroup
+    public class LogEntry
     {
-        public string Name { get; set; } = "Schedule";
-        public bool Enabled { get; set; } = false;
-        public string StartTime { get; set; } = "09:00";
-        public string EndTime { get; set; } = "17:00";
-        public string Days { get; set; } = "Mon,Tue,Wed,Thu,Fri";
+        public DateTime Timestamp { get; set; }
+        public string Message { get; set; }
+
+        public override string ToString()
+        {
+            return "[" + Timestamp.ToString("MM-dd HH:mm:ss") + "] " + Message;
+        }
     }
 
     public class AppSettings
     {
+        private const string RegistryPath = @"Software\AUTO4W";
+        private const int MaxLogDays = 7;
+        private const int MaxLogEntries = 400;
+
         public string IncomingFolder { get; set; } = @"C:\AUTO4W\Incoming";
-        public string ToprintFolder { get; set; } = @"C:\AUTO4W\Toprint";
+        public string ToprintFolder { get; set; } = @"C:\AUTO4W\ToPrint";
         public string DigitalFolder { get; set; } = @"C:\AUTO4W\Digital";
         public string ErrorsFolder { get; set; } = @"C:\AUTO4W\Errors";
-        public bool FourWalletsEnabled { get; set; } = true;
-        public bool AutoErrorFixEnabled { get; set; } = true;
+
         public bool OrderSeparationEnabled { get; set; } = true;
-        public bool RunAtStartup { get; set; } = false;
-        public bool DarkTheme { get; set; } = false;
-        public string AccentColor { get; set; } = "Blue";
-        public string OldExtension { get; set; } = ".old";
-        public string NewExtension { get; set; } = ".jpg";
-        public string PhotoSize { get; set; } = "Wallet";
-        public string PhotoLayout { get; set; } = "4 per page";
-        public bool ConfirmBeforeProcessing { get; set; } = true;
-        public List<ScheduleGroup> Schedules { get; set; } = CreateSchedules();
+        public bool FourWalletsEnabled { get; set; } = true;
+        public bool AutoErrorFixEnabled { get; set; } = false;
 
-        private static List<ScheduleGroup> CreateSchedules()
-        {
-            var list = new List<ScheduleGroup>();
-            for (int i = 1; i <= 6; i++)
-                list.Add(new ScheduleGroup { Name = "Schedule " + i, StartTime = "09:00", EndTime = "17:00" });
-            return list;
-        }
+        public string Selected4WSize { get; set; } = "4-Wallets (vert)";
+        public bool DarkTheme { get; set; } = true;
 
-        public static string SettingsDirectory
-        {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AUTO4W"); }
-        }
-
-        public static string SettingsPath { get { return Path.Combine(SettingsDirectory, "settings.json"); } }
+        public List<LogEntry> HistoryLogs { get; set; } = new List<LogEntry>();
 
         public static AppSettings Load()
         {
+            var settings = new AppSettings();
             try
             {
-                if (!File.Exists(SettingsPath)) return new AppSettings();
-                var serializer = new JavaScriptSerializer();
-                var loaded = serializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath));
-                if (loaded == null) return new AppSettings();
-                if (loaded.Schedules == null || loaded.Schedules.Count != 6) loaded.Schedules = CreateSchedules();
-                return loaded;
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
+                {
+                    if (key == null) return settings;
+
+                    settings.IncomingFolder = Convert.ToString(key.GetValue("IncomingFolder", settings.IncomingFolder));
+                    settings.ToprintFolder = Convert.ToString(key.GetValue("ToprintFolder", settings.ToprintFolder));
+                    settings.DigitalFolder = Convert.ToString(key.GetValue("DigitalFolder", settings.DigitalFolder));
+                    settings.ErrorsFolder = Convert.ToString(key.GetValue("ErrorsFolder", settings.ErrorsFolder));
+
+                    settings.OrderSeparationEnabled = Convert.ToInt32(key.GetValue("OrderSeparationEnabled", 1)) == 1;
+                    settings.FourWalletsEnabled = Convert.ToInt32(key.GetValue("FourWalletsEnabled", 1)) == 1;
+                    settings.AutoErrorFixEnabled = Convert.ToInt32(key.GetValue("AutoErrorFixEnabled", 0)) == 1;
+
+                    settings.Selected4WSize = Convert.ToString(key.GetValue("Selected4WSize", settings.Selected4WSize));
+                    settings.DarkTheme = Convert.ToInt32(key.GetValue("DarkTheme", 1)) == 1;
+
+                    string[] rawLogs = key.GetValue("HistoryLogs") as string[];
+                    if (rawLogs != null)
+                    {
+                        DateTime cutoff = DateTime.Now.AddDays(-MaxLogDays);
+                        foreach (string raw in rawLogs)
+                        {
+                            int sepIndex = raw.IndexOf('|');
+                            if (sepIndex > 0)
+                            {
+                                string datePart = raw.Substring(0, sepIndex);
+                                string msgPart = raw.Substring(sepIndex + 1);
+                                DateTime parsedTime;
+                                if (DateTime.TryParseExact(datePart, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsedTime))
+                                {
+                                    if (parsedTime >= cutoff)
+                                    {
+                                        settings.HistoryLogs.Add(new LogEntry { Timestamp = parsedTime, Message = msgPart });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                settings.PruneAndSaveLogs();
             }
-            catch { return new AppSettings(); }
+            catch
+            {
+            }
+            return settings;
         }
 
         public void Save()
         {
-            Directory.CreateDirectory(SettingsDirectory);
-            var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-            File.WriteAllText(SettingsPath, serializer.Serialize(this));
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
+                {
+                    if (key == null) return;
+
+                    key.SetValue("IncomingFolder", IncomingFolder ?? "");
+                    key.SetValue("ToprintFolder", ToprintFolder ?? "");
+                    key.SetValue("DigitalFolder", DigitalFolder ?? "");
+                    key.SetValue("ErrorsFolder", ErrorsFolder ?? "");
+
+                    key.SetValue("OrderSeparationEnabled", OrderSeparationEnabled ? 1 : 0, RegistryValueKind.DWord);
+                    key.SetValue("FourWalletsEnabled", FourWalletsEnabled ? 1 : 0, RegistryValueKind.DWord);
+                    key.SetValue("AutoErrorFixEnabled", AutoErrorFixEnabled ? 1 : 0, RegistryValueKind.DWord);
+
+                    key.SetValue("Selected4WSize", Selected4WSize ?? "4-Wallets (vert)");
+                    key.SetValue("DarkTheme", DarkTheme ? 1 : 0, RegistryValueKind.DWord);
+                }
+                PruneAndSaveLogs();
+            }
+            catch
+            {
+            }
+        }
+
+        public void AddLog(string message)
+        {
+            HistoryLogs.Add(new LogEntry
+            {
+                Timestamp = DateTime.Now,
+                Message = message
+            });
+            PruneAndSaveLogs();
+        }
+
+        public void ClearLogs()
+        {
+            HistoryLogs.Clear();
+            PruneAndSaveLogs();
+        }
+
+        public void PruneAndSaveLogs()
+        {
+            try
+            {
+                DateTime cutoff = DateTime.Now.AddDays(-MaxLogDays);
+                HistoryLogs = HistoryLogs
+                    .Where(l => l.Timestamp >= cutoff)
+                    .OrderBy(l => l.Timestamp)
+                    .ToList();
+
+                if (HistoryLogs.Count > MaxLogEntries)
+                {
+                    HistoryLogs = HistoryLogs.Skip(HistoryLogs.Count - MaxLogEntries).ToList();
+                }
+
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
+                {
+                    if (key == null) return;
+                    string[] serialized = HistoryLogs
+                        .Select(l => l.Timestamp.ToString("O", CultureInfo.InvariantCulture) + "|" + l.Message)
+                        .ToArray();
+                    key.SetValue("HistoryLogs", serialized, RegistryValueKind.MultiString);
+                }
+            }
+            catch
+            {
+            }
         }
     }
 }
