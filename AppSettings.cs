@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace AUTO4W
@@ -21,7 +22,17 @@ namespace AUTO4W
     {
         private const string RegistryPath = @"Software\AUTO4W";
         private const int MaxLogDays = 7;
-        private const int MaxLogEntries = 400;
+        private const int MaxLogEntries = 350;
+
+        public static readonly string[] Default4WSizes = new string[]
+        {
+            "4-Wallets Vert",
+            "4-2.5x3.5 Wallets",
+            "4-2.5x3.5 Wallets (8x10)",
+            "4-2.5x3.5 Wallets (5x7)"
+        };
+
+        private readonly object syncLock = new object();
 
         public string IncomingFolder { get; set; } = @"C:\AUTO4W\Incoming";
         public string ToprintFolder { get; set; } = @"C:\AUTO4W\ToPrint";
@@ -32,31 +43,61 @@ namespace AUTO4W
         public bool FourWalletsEnabled { get; set; } = true;
         public bool AutoErrorFixEnabled { get; set; } = false;
 
-        public string Selected4WSize { get; set; } = "4-Wallets (vert)";
+        public string Selected4WSize { get; set; } = "4-Wallets Vert";
+        public List<string> Custom4WSizes { get; set; } = new List<string>();
         public bool DarkTheme { get; set; } = true;
+
+        // Auto 4W Schedule Settings (Controls Auto 4W only)
+        public bool Schedule4WEnabled { get; set; } = false;
+        public string Schedule4WStart { get; set; } = "08:00";
+        public string Schedule4WEnd { get; set; } = "17:00";
+        public string Schedule4WDays { get; set; } = "1,1,1,1,1,1,1"; // Mon..Sun
+        public bool Schedule4WUseDate { get; set; } = false;
+        public string Schedule4WDate { get; set; } = DateTime.Now.ToString("yyyy-MM-dd");
 
         public List<LogEntry> HistoryLogs { get; set; } = new List<LogEntry>();
 
         public static AppSettings Load()
         {
-            var settings = new AppSettings();
+            var s = new AppSettings();
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
                 {
-                    if (key == null) return settings;
+                    if (key == null) return s;
 
-                    settings.IncomingFolder = Convert.ToString(key.GetValue("IncomingFolder", settings.IncomingFolder));
-                    settings.ToprintFolder = Convert.ToString(key.GetValue("ToprintFolder", settings.ToprintFolder));
-                    settings.DigitalFolder = Convert.ToString(key.GetValue("DigitalFolder", settings.DigitalFolder));
-                    settings.ErrorsFolder = Convert.ToString(key.GetValue("ErrorsFolder", settings.ErrorsFolder));
+                    s.IncomingFolder = Convert.ToString(key.GetValue("IncomingFolder", s.IncomingFolder));
+                    s.ToprintFolder = Convert.ToString(key.GetValue("ToprintFolder", s.ToprintFolder));
+                    s.DigitalFolder = Convert.ToString(key.GetValue("DigitalFolder", s.DigitalFolder));
+                    s.ErrorsFolder = Convert.ToString(key.GetValue("ErrorsFolder", s.ErrorsFolder));
 
-                    settings.OrderSeparationEnabled = Convert.ToInt32(key.GetValue("OrderSeparationEnabled", 1)) == 1;
-                    settings.FourWalletsEnabled = Convert.ToInt32(key.GetValue("FourWalletsEnabled", 1)) == 1;
-                    settings.AutoErrorFixEnabled = Convert.ToInt32(key.GetValue("AutoErrorFixEnabled", 0)) == 1;
+                    s.OrderSeparationEnabled = Convert.ToInt32(key.GetValue("OrderSeparationEnabled", 1)) == 1;
+                    s.FourWalletsEnabled = Convert.ToInt32(key.GetValue("FourWalletsEnabled", 1)) == 1;
+                    s.AutoErrorFixEnabled = Convert.ToInt32(key.GetValue("AutoErrorFixEnabled", 0)) == 1;
 
-                    settings.Selected4WSize = Convert.ToString(key.GetValue("Selected4WSize", settings.Selected4WSize));
-                    settings.DarkTheme = Convert.ToInt32(key.GetValue("DarkTheme", 1)) == 1;
+                    s.Selected4WSize = Convert.ToString(key.GetValue("Selected4WSize", s.Selected4WSize));
+                    s.DarkTheme = Convert.ToInt32(key.GetValue("DarkTheme", 1)) == 1;
+
+                    s.Schedule4WEnabled = Convert.ToInt32(key.GetValue("Schedule4WEnabled", 0)) == 1;
+                    s.Schedule4WStart = Convert.ToString(key.GetValue("Schedule4WStart", s.Schedule4WStart));
+                    s.Schedule4WEnd = Convert.ToString(key.GetValue("Schedule4WEnd", s.Schedule4WEnd));
+                    s.Schedule4WDays = Convert.ToString(key.GetValue("Schedule4WDays", s.Schedule4WDays));
+                    s.Schedule4WUseDate = Convert.ToInt32(key.GetValue("Schedule4WUseDate", 0)) == 1;
+                    s.Schedule4WDate = Convert.ToString(key.GetValue("Schedule4WDate", s.Schedule4WDate));
+
+                    string[] customSizes = key.GetValue("Custom4WSizes") as string[];
+                    if (customSizes != null)
+                    {
+                        foreach (string sz in customSizes)
+                        {
+                            if (!string.IsNullOrWhiteSpace(sz) &&
+                                !Default4WSizes.Contains(sz, StringComparer.OrdinalIgnoreCase) &&
+                                !s.Custom4WSizes.Contains(sz, StringComparer.OrdinalIgnoreCase))
+                            {
+                                s.Custom4WSizes.Add(sz.Trim());
+                            }
+                        }
+                    }
 
                     string[] rawLogs = key.GetValue("HistoryLogs") as string[];
                     if (rawLogs != null)
@@ -64,101 +105,104 @@ namespace AUTO4W
                         DateTime cutoff = DateTime.Now.AddDays(-MaxLogDays);
                         foreach (string raw in rawLogs)
                         {
-                            int sepIndex = raw.IndexOf('|');
-                            if (sepIndex > 0)
+                            int idx = raw.IndexOf('|');
+                            if (idx > 0)
                             {
-                                string datePart = raw.Substring(0, sepIndex);
-                                string msgPart = raw.Substring(sepIndex + 1);
-                                DateTime parsedTime;
-                                if (DateTime.TryParseExact(datePart, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsedTime))
+                                DateTime dt;
+                                if (DateTime.TryParseExact(raw.Substring(0, idx), "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt))
                                 {
-                                    if (parsedTime >= cutoff)
+                                    if (dt >= cutoff)
                                     {
-                                        settings.HistoryLogs.Add(new LogEntry { Timestamp = parsedTime, Message = msgPart });
+                                        s.HistoryLogs.Add(new LogEntry { Timestamp = dt, Message = raw.Substring(idx + 1) });
                                     }
                                 }
                             }
                         }
                     }
                 }
-                settings.PruneAndSaveLogs();
             }
             catch
             {
             }
-            return settings;
+            return s;
+        }
+
+        public void SaveAsync()
+        {
+            Task.Run(() => Save());
         }
 
         public void Save()
         {
-            try
+            lock (syncLock)
             {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
+                try
                 {
-                    if (key == null) return;
+                    DateTime cutoff = DateTime.Now.AddDays(-MaxLogDays);
+                    HistoryLogs = HistoryLogs
+                        .Where(l => l.Timestamp >= cutoff)
+                        .OrderBy(l => l.Timestamp)
+                        .ToList();
 
-                    key.SetValue("IncomingFolder", IncomingFolder ?? "");
-                    key.SetValue("ToprintFolder", ToprintFolder ?? "");
-                    key.SetValue("DigitalFolder", DigitalFolder ?? "");
-                    key.SetValue("ErrorsFolder", ErrorsFolder ?? "");
+                    if (HistoryLogs.Count > MaxLogEntries)
+                    {
+                        HistoryLogs = HistoryLogs.Skip(HistoryLogs.Count - MaxLogEntries).ToList();
+                    }
 
-                    key.SetValue("OrderSeparationEnabled", OrderSeparationEnabled ? 1 : 0, RegistryValueKind.DWord);
-                    key.SetValue("FourWalletsEnabled", FourWalletsEnabled ? 1 : 0, RegistryValueKind.DWord);
-                    key.SetValue("AutoErrorFixEnabled", AutoErrorFixEnabled ? 1 : 0, RegistryValueKind.DWord);
+                    using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
+                    {
+                        if (key == null) return;
 
-                    key.SetValue("Selected4WSize", Selected4WSize ?? "4-Wallets (vert)");
-                    key.SetValue("DarkTheme", DarkTheme ? 1 : 0, RegistryValueKind.DWord);
+                        key.SetValue("IncomingFolder", IncomingFolder ?? "");
+                        key.SetValue("ToprintFolder", ToprintFolder ?? "");
+                        key.SetValue("DigitalFolder", DigitalFolder ?? "");
+                        key.SetValue("ErrorsFolder", ErrorsFolder ?? "");
+
+                        key.SetValue("OrderSeparationEnabled", OrderSeparationEnabled ? 1 : 0, RegistryValueKind.DWord);
+                        key.SetValue("FourWalletsEnabled", FourWalletsEnabled ? 1 : 0, RegistryValueKind.DWord);
+                        key.SetValue("AutoErrorFixEnabled", AutoErrorFixEnabled ? 1 : 0, RegistryValueKind.DWord);
+
+                        key.SetValue("Selected4WSize", Selected4WSize ?? "4-Wallets Vert");
+                        key.SetValue("Custom4WSizes", Custom4WSizes.ToArray(), RegistryValueKind.MultiString);
+                        key.SetValue("DarkTheme", DarkTheme ? 1 : 0, RegistryValueKind.DWord);
+
+                        key.SetValue("Schedule4WEnabled", Schedule4WEnabled ? 1 : 0, RegistryValueKind.DWord);
+                        key.SetValue("Schedule4WStart", Schedule4WStart ?? "08:00");
+                        key.SetValue("Schedule4WEnd", Schedule4WEnd ?? "17:00");
+                        key.SetValue("Schedule4WDays", Schedule4WDays ?? "1,1,1,1,1,1,1");
+                        key.SetValue("Schedule4WUseDate", Schedule4WUseDate ? 1 : 0, RegistryValueKind.DWord);
+                        key.SetValue("Schedule4WDate", Schedule4WDate ?? DateTime.Now.ToString("yyyy-MM-dd"));
+
+                        string[] serializedLogs = HistoryLogs
+                            .Select(l => l.Timestamp.ToString("O", CultureInfo.InvariantCulture) + "|" + l.Message)
+                            .ToArray();
+                        key.SetValue("HistoryLogs", serializedLogs, RegistryValueKind.MultiString);
+                    }
                 }
-                PruneAndSaveLogs();
-            }
-            catch
-            {
+                catch
+                {
+                }
             }
         }
 
-        public void AddLog(string message)
+        public LogEntry AddLog(string message)
         {
-            HistoryLogs.Add(new LogEntry
+            var entry = new LogEntry { Timestamp = DateTime.Now, Message = message };
+            lock (syncLock)
             {
-                Timestamp = DateTime.Now,
-                Message = message
-            });
-            PruneAndSaveLogs();
+                HistoryLogs.Add(entry);
+            }
+            SaveAsync();
+            return entry;
         }
 
         public void ClearLogs()
         {
-            HistoryLogs.Clear();
-            PruneAndSaveLogs();
-        }
-
-        public void PruneAndSaveLogs()
-        {
-            try
+            lock (syncLock)
             {
-                DateTime cutoff = DateTime.Now.AddDays(-MaxLogDays);
-                HistoryLogs = HistoryLogs
-                    .Where(l => l.Timestamp >= cutoff)
-                    .OrderBy(l => l.Timestamp)
-                    .ToList();
-
-                if (HistoryLogs.Count > MaxLogEntries)
-                {
-                    HistoryLogs = HistoryLogs.Skip(HistoryLogs.Count - MaxLogEntries).ToList();
-                }
-
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
-                {
-                    if (key == null) return;
-                    string[] serialized = HistoryLogs
-                        .Select(l => l.Timestamp.ToString("O", CultureInfo.InvariantCulture) + "|" + l.Message)
-                        .ToArray();
-                    key.SetValue("HistoryLogs", serialized, RegistryValueKind.MultiString);
-                }
+                HistoryLogs.Clear();
             }
-            catch
-            {
-            }
+            SaveAsync();
         }
     }
 }
